@@ -1,10 +1,4 @@
-*.d
-*.o
-*.log
-include/fbs
-cachegrind.out*
-build
-.agents
-.codex
-data/*
-!data/basic.csv
+build/
+include/fbs/
+.d
+.o
