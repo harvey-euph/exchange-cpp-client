@@ -1,0 +1,114 @@
+namespace Exchange;
+
+enum Side : byte { Buy = 0, Sell = 1, None = 2 }
+enum OrderType : byte { Limit = 0, Market = 1, IOC = 2, FOK = 3 /* 可再擴充 */ }
+enum OrderAction : byte { New = 0, Cancel = 1, Modify = 2 }
+enum RejectCode : byte { None = 0, PriceInvalid, OrderNotFound, InvalidAction, InvalidModify, Unknown = -1 }
+enum ExecType : byte { New = 0, PartialFill = 1, Fill = 2, Cancelled = 4, Replaced = 5 }
+
+table OrderRequest
+{
+    action: OrderAction;
+    exec_id: ulong;           // Unique on client_id
+    order_id: ulong;          // Reuse for modify/cancel, Unique universely
+    client_id: uint;
+    symbol_id: uint;
+    side: Side;
+    type: OrderType;
+    p: long;              // 定點數
+    q: ulong;
+    visible_qty: ulong = 0;   // For Iceberg
+    timestamp: ulong;         // microseconds
+}
+
+table OrderResponse
+{
+    exec_type: ExecType;
+    order_id: ulong;          // Reuse for modify/cancel, Unique universely
+    client_id: uint;
+    exec_id: ulong;           // Correlate with OrderRequest.exec_id
+    symbol_id: uint;
+    side: Side;
+    p: long;
+    q: ulong;
+    reject_code: RejectCode;
+}
+
+table PositionRequest {
+    client_id: uint;
+    symbol_id: uint;
+}
+
+table OrderStatusRequest {
+    client_id: uint;
+    order_id: ulong; // If 0, all orders for this client
+}
+
+union ClientRequestData {
+    OrderRequest,
+    PositionRequest,
+    OrderStatusRequest
+}
+
+table ClientRequest {
+    data: ClientRequestData;
+}
+
+table PositionResponse {
+    client_id: uint;
+    symbol_id: uint;
+    position: long;
+}
+
+union ClientResponseData {
+    OrderResponse,
+    PositionResponse
+}
+
+table ClientResponse {
+    data: ClientResponseData;
+}
+
+table L2Update
+{
+    symbol_id: uint;
+    seq_num: ulong;
+    side: Side;
+    p: long;
+    q: ulong;
+    timestamp: ulong;
+}
+
+table L2Batch
+{
+    seq_num: ulong;
+    updates: [L2Update];
+}
+
+table L3Update
+{
+    symbol_id: uint;
+    exec_type: ExecType;
+    seq_num: ulong;
+    order_id: ulong;
+    side: Side;
+    p: long;
+    q: ulong; // filled quantity when filled
+    timestamp: ulong;
+}
+
+table L3Batch {
+    seq_num: ulong;
+    updates: [L3Update];
+}
+
+root_type OrderRequest;
+root_type OrderResponse;
+root_type ClientRequest;
+root_type ClientResponse;
+
+root_type L2Update;
+root_type L2Batch;
+
+root_type L3Update;
+root_type L3Batch;
