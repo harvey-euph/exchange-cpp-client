@@ -8,7 +8,7 @@ APP_DIR := app
 FBS_DIR := fbs
 FBS_OUT := include/fbs
 LDFLAGS := -L/home/harvey/vcpkg/installed/x64-linux/lib
-LDLIBS := -pthread 
+LDLIBS := -pthread -lrt
 
 # -----------------------------------------------------------------------------
 # FlatBuffers

@@ -2,3 +2,4 @@ build/
 include/fbs/
 .d
 .o
+log

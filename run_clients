@@ -1,0 +1,100 @@
+#!/bin/bash
+
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="$PROJECT_ROOT/log"
+SESSION="exchange_clients"
+
+mkdir -p "$LOG_DIR"
+
+declare -A SERVICES=(
+    ["Price Source"]="build/PriceSource"
+    ["Market Maker"]="build/MarketMaker"
+    ["Insider"]="build/Insider"
+    ["Noise Trader"]="build/NoiseTrader"
+    ["Strategy Trader"]="build/StrategyTrader"
+)
+
+SERVICE_NAMES=("Price Source" "Market Maker" "Insider" "Noise Trader" "Strategy Trader")
+
+declare -A SERVICE_LOGS=(
+    ["Price Source"]="price_source.log"
+    ["Market Maker"]="market_maker.log"
+    ["Insider"]="insider.log"
+    ["Noise Trader"]="noise_trader.log"
+    ["Strategy Trader"]="strategy_trader.log"
+)
+
+# Check if session already exists
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "Re-attaching to existing session '$SESSION'..."
+    sleep 1
+    if [ -n "$TMUX" ]; then
+        tmux switch-client -t "$SESSION"
+    else
+        tmux attach-session -t "$SESSION"
+    fi
+    exit 0
+fi
+
+# Start a new detached session
+tmux new-session -d -s "$SESSION" -n "Monitor" "bash"
+
+# Basic tmux configuration
+tmux set-option -t "$SESSION" status-bg black
+tmux set-option -t "$SESSION" status-fg white
+tmux bind-key -r Left select-window -t :-
+tmux bind-key -r Right select-window -t :+
+
+# Create windows for each client service
+for name in "${SERVICE_NAMES[@]}"; do
+    log="$LOG_DIR/${SERVICE_LOGS[$name]}"
+    exe="${SERVICES[$name]}"
+    
+    # Run the service in a loop for auto-restart
+    tmux new-window -t "$SESSION" -n "$name" "bash -c 'while true; do echo \"--- Starting $name ---\"; $PROJECT_ROOT/$exe 2>&1 | tee -a $log; echo \"--- $name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
+done
+
+# Select the Monitor window
+tmux select-window -t "$SESSION":0
+
+# Monitor Loop
+MONITOR_CMD=$(cat <<EOF
+trap "break" SIGINT SIGTERM
+while true; do
+    tput cup 0 0
+    echo "================================================================================"
+    echo "EXCHANGE CLIENTS MONITOR - [Ctrl+B, d] to Detach"
+    echo "================================================================================"
+    printf "%-25s %-10s %-10s %-10s %-10s\n" "CLIENT" "STATUS" "PID" "%CPU" "MEM(MB)"
+    echo "--------------------------------------------------------------------------------"
+    for name in "PriceSource" "MarketMaker" "Insider" "NoiseTrader" "StrategyTrader"; do
+        PID=\$(pgrep -n -f "/\$name\$")
+        if [ -n "\$PID" ]; then
+            STATS=\$(ps -p \$PID -o pcpu,rss --no-headers 2>/dev/null)
+            if [ -n "\$STATS" ]; then
+                CPU=\$(echo \$STATS | awk '{print \$1}')
+                RSS_KB=\$(echo \$STATS | awk '{print \$2}')
+                RSS_MB=\$(echo \$RSS_KB | awk '{printf "%.1f", \$1/1024}')
+                printf "%-25s %-10s %-10s %-10s %-10s\n" "\$name" "ALIVE" "\$PID" "\$CPU%" "\${RSS_MB}MB"
+            else
+                printf "%-25s %-10s %-10s %-10s %-10s\n" "\$name" "STARTING" "\$PID" "-" "-"
+            fi
+        else
+            printf "%-25s %-10s %-10s %-10s %-10s\n" "\$name" "DEAD" "-" "-" "-"
+        fi
+    done
+    echo "================================================================================"
+    sleep 1
+done
+EOF
+)
+
+# Send the monitor command to Window 0
+tmux send-keys -t "$SESSION":0 "$MONITOR_CMD" C-m
+
+# Final re-attach
+if [ -n "$TMUX" ]; then
+    tmux switch-client -t "$SESSION"
+else
+    tmux attach-session -t "$SESSION"
+fi
