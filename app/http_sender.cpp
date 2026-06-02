@@ -8,6 +8,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -77,6 +79,7 @@ int main(int argc, char** argv) {
     for (const auto* order : requests) {
         logOrderRequest(order, "[HTTP Sender]");
         send_http_order(host, port, order);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     return 0;

@@ -33,6 +33,13 @@ struct L3Book {
 
     void update(ExecType type, uint64_t order_id, Side side, int64_t price, uint64_t qty) {
         std::lock_guard<std::mutex> lock(mutex);
+
+        if (side == Side_None) {
+            orders.clear();
+            bids.clear();
+            asks.clear();
+            return;
+        }
         
         switch (type) {
             case ExecType_New: {
