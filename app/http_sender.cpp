@@ -1,5 +1,6 @@
 #include "csv_util.hpp"
 #include "fbs/order_generated.h"
+#include "LogUtil.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/asio/connect.hpp>
@@ -74,12 +75,7 @@ int main(int argc, char** argv) {
     std::cout << "Loaded " << requests.size() << " orders from " << csv_path << std::endl;
 
     for (const auto* order : requests) {
-        std::cout << "Sending order: action=" << EnumNameOrderAction(order->action())
-                  << ", client_id=" << order->client_id()
-                  << ", req_id=" << order->exec_id()
-                  << ", order_id=" << order->order_id()
-                  << ", symbol=" << order->symbol_id() << "..." << std::endl;
-        
+        logOrderRequest(order, "[HTTP Sender]");
         send_http_order(host, port, order);
     }
 

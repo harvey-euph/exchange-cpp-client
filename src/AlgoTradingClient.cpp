@@ -126,6 +126,11 @@ void AlgoTradingClient::query_position(uint32_t symbol_id) {
     mgmt_client_->send(fbb.GetBufferPointer(), fbb.GetSize());
 }
 
+void AlgoTradingClient::wait_until_ready() {
+    std::unique_lock<std::mutex> lock(ready_mtx_);
+    ready_cv_.wait(lock, [this] { return ready_.load(); });
+}
+
 int AlgoTradingClient::run() {
     if (!mgmt_client_->connect()) {
         std::cerr << "Failed to connect to Management port " << config_.mgmt_port << std::endl;
@@ -144,7 +149,15 @@ int AlgoTradingClient::run() {
         (void)size;
         auto resp = flatbuffers::GetRoot<ClientResponse>(data);
         if (resp->data_type() == ClientResponseData_OrderResponse) {
-            on_order_response(resp->data_as_OrderResponse());
+            auto order_resp = resp->data_as_OrderResponse();
+            if (order_resp->exec_type() == ExecType_Complete) {
+                {
+                    std::lock_guard<std::mutex> lock(ready_mtx_);
+                    ready_ = true;
+                }
+                ready_cv_.notify_all();
+            }
+            on_order_response(order_resp);
         } else if (resp->data_type() == ClientResponseData_PositionResponse) {
             on_position_response(resp->data_as_PositionResponse());
         }

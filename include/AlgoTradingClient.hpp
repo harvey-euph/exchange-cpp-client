@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
 
 namespace Exchange {
 
@@ -48,6 +51,9 @@ public:
     int run();
     void stop();
 
+    bool is_ready() const { return ready_; }
+    void wait_until_ready();
+
 protected:
     Config config_;
     std::unique_ptr<SimpleWSClient> mgmt_client_;
@@ -55,6 +61,10 @@ protected:
     std::unique_ptr<SimpleWSClient> l3_client_;
     bool running_ = true;
     uint64_t next_id_ = 1000001;
+
+    std::atomic<bool> ready_{false};
+    std::mutex ready_mtx_;
+    std::condition_variable ready_cv_;
 };
 
 } // namespace Exchange

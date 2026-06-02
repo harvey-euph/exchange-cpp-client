@@ -1,60 +1,52 @@
-#include "AlgoTradingClient.hpp"
-#include <iostream>
+#pragma once
 #include <map>
+#include <mutex>
+#include <cstdint>
+#include <iostream>
 #include <iomanip>
 #include <vector>
-#include <mutex>
+#include <string>
+#include "fbs/order_generated.h"
 
 namespace Exchange {
 
-class L2OrderBookClient : public AlgoTradingClient {
-public:
-    L2OrderBookClient(const Config& config) : AlgoTradingClient(config) {
-        // Use a small trick to clear screen initially
-        std::cout << "\033[2J\033[H" << std::flush;
-    }
+struct L2Book {
+    uint32_t symbol_id = 0;
+    std::map<int64_t, uint64_t, std::greater<int64_t>> bids;
+    std::map<int64_t, uint64_t> asks;
+    std::mutex mutex;
 
-    void on_l2_update(const L2Update* update) override {
-        // Snapshot markers often have side = None or price/qty = 0
-        if (update->side() == Side_None) return;
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (update->side() == Side_Buy) {
-            if (update->q() == 0) {
-                bids_.erase(update->p());
+    void update(Side side, int64_t price, uint64_t qty) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (side == Side_None) {
+            bids.clear();
+            asks.clear();
+            return;
+        }
+        if (side == Side_Buy) {
+            if (qty == 0) {
+                bids.erase(price);
             } else {
-                bids_[update->p()] = update->q();
+                bids[price] = qty;
             }
-        } else if (update->side() == Side_Sell) {
-            if (update->q() == 0) {
-                asks_.erase(update->p());
+        } else {
+            if (qty == 0) {
+                asks.erase(price);
             } else {
-                asks_[update->p()] = update->q();
+                asks[price] = qty;
             }
         }
-        
-        display();
     }
 
-    // Unused overrides
-    void on_l3_update(const L3Update*) override {}
-    void on_order_response(const OrderResponse*) override {}
-    void on_position_response(const PositionResponse*) override {}
-
-private:
     void display() {
+        std::lock_guard<std::mutex> lock(mutex);
         // \033[H moves cursor to top-left (home)
         std::cout << "\033[H";
         
-        uint32_t symbol = config_.symbol_ids.empty() ? 0 : config_.symbol_ids[0];
-        std::string title = "L2 Book: " + std::to_string(symbol);
+        std::string title = "L2 Book: " + std::to_string(symbol_id);
 
         int depth_limit = 10;
         int bar_max_width = 20;
-        // Total width calculation: 
-        // border("* ") [2] + index [3] + sp [1] + price [10] + sp [1] + qty [10] + sp [1] + bar [20] + border(" *") [2]
-        // = 2 + 3 + 1 + 10 + 1 + 10 + 1 + 20 + 2 = 50
         int total_width = 50;
         int content_inner_width = total_width - 4; // 46
 
@@ -83,7 +75,7 @@ private:
         uint64_t max_qty = 1; 
         std::vector<std::pair<int64_t, uint64_t>> ask_list;
         int count = 0;
-        for (const auto& pair : asks_) {
+        for (const auto& pair : asks) {
             ask_list.push_back(pair);
             if (pair.second > max_qty) max_qty = pair.second;
             if (++count >= depth_limit) break;
@@ -91,7 +83,7 @@ private:
         
         count = 0;
         std::vector<std::pair<int64_t, uint64_t>> bid_list;
-        for (const auto& pair : bids_) {
+        for (const auto& pair : bids) {
             bid_list.push_back(pair);
             if (pair.second > max_qty) max_qty = pair.second;
             if (++count >= depth_limit) break;
@@ -140,27 +132,6 @@ private:
         // Clear anything below the book in case depth decreased
         std::cout << "\033[J" << std::flush;
     }
-
-    // Bids: High to Low
-    std::map<int64_t, uint64_t, std::greater<int64_t>> bids_;
-    // Asks: Low to High
-    std::map<int64_t, uint64_t> asks_;
-    std::mutex mutex_;
 };
 
 } // namespace Exchange
-
-int main(int argc, char** argv) {
-    Exchange::AlgoTradingConfig config;
-    if (argc > 1) {
-        config.symbol_ids = { static_cast<uint32_t>(std::stoul(argv[1])) };
-    }
-
-    try {
-        Exchange::L2OrderBookClient client(config);
-        return client.run();
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-}
