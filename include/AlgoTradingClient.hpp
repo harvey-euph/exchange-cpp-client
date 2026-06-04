@@ -2,6 +2,7 @@
 
 #include "SimpleWSClient.hpp"
 #include "fbs/order_generated.h"
+#include "ClientAccount.hpp"
 #include <string>
 #include <vector>
 #include <memory>
@@ -31,8 +32,8 @@ public:
 
     virtual void on_l2_update(const L2Update* update) = 0;
     virtual void on_l3_update(const L3Update* update) = 0;
-    virtual void on_order_response(const OrderResponse* response) = 0;
-    virtual void on_position_response(const PositionResponse* response) = 0;
+    virtual void on_order_response(const OrderResponse* response);
+    virtual void on_position_response(const PositionResponse* response);
 
     // Layer 2: Convenience
     void new_limit_order(uint32_t symbol_id, Side side, int64_t p, uint64_t q, uint64_t visible_qty = 0);
@@ -65,6 +66,8 @@ protected:
     std::atomic<bool> ready_{false};
     std::mutex ready_mtx_;
     std::condition_variable ready_cv_;
+
+    ClientAccount account_;
 };
 
 } // namespace Exchange

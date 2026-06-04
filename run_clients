@@ -12,9 +12,10 @@ declare -A SERVICES=(
     ["Insider"]="build/Insider"
     ["Noise Trader"]="build/NoiseTrader"
     ["Strategy Trader"]="build/StrategyTrader"
+    ["Martingale Trader"]="build/MartingaleTrader"
 )
 
-SERVICE_NAMES=("Price Source" "Market Maker" "Insider" "Noise Trader" "Strategy Trader")
+SERVICE_NAMES=("Price Source" "Market Maker" "Insider" "Noise Trader" "Strategy Trader" "Martingale Trader")
 
 declare -A SERVICE_LOGS=(
     ["Price Source"]="price_source.log"
@@ -22,6 +23,7 @@ declare -A SERVICE_LOGS=(
     ["Insider"]="insider.log"
     ["Noise Trader"]="noise_trader.log"
     ["Strategy Trader"]="strategy_trader.log"
+    ["Martingale Trader"]="martingale.log"
 )
 
 # Check if session already exists

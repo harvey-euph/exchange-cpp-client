@@ -45,7 +45,7 @@ public:
     void on_l3_update(const L3Update* /*update*/) override {}
 
     void on_order_response(const OrderResponse* response) override {
-        account_.handle_order_response(response);
+        AlgoTradingClient::on_order_response(response);
         if (response->exec_type() == ExecType_PartialFill || response->exec_type() == ExecType_Fill) {
             std::lock_guard<std::mutex> lock(strategy_mtx_);
             double impact = static_cast<double>(response->q()) * toxicity_impact_factor_;
@@ -58,7 +58,7 @@ public:
     }
 
     void on_position_response(const PositionResponse* response) override {
-        account_.handle_position_response(response);
+        AlgoTradingClient::on_position_response(response);
     }
 
     void run_strategy() {
@@ -208,15 +208,21 @@ private:
     }
 
     void display_status(double total_skew, double inv_skew, double tox_skew, double vol, double asset_ratio) {
+        (void) vol;
         static int count = 0;
         if (++count % 5 != 0) return; 
+
+        int64_t pos = account_.get_position(target_symbol_);
+        int64_t cash = account_.get_cash();
+        double net_value = cash + pos * fair_price_;
 
         std::cout << "\033[H\033[J";
         std::cout << "========== Advanced MM (Stale Price Observer) ==========" << std::endl;
         std::cout << "Target Symbol: " << target_symbol_ << " | Client ID: " << config_.client_id << std::endl;
         std::cout << "Fair Price (STALE): " << std::fixed << std::setprecision(2) << fair_price_ << std::endl;
-        std::cout << "Position:           " << account_.get_position(target_symbol_) << std::endl;
-        std::cout << "Cash:               " << account_.get_cash() << std::endl;
+        std::cout << "Total Value:        " << std::fixed << std::setprecision(2) << net_value << std::endl;
+        std::cout << "Position:           " << pos << std::endl;
+        std::cout << "Cash:               " << cash << std::endl;
         std::cout << "Asset Ratio:        " << std::fixed << std::setprecision(4) << asset_ratio << std::endl;
         std::cout << "Total Skew:         " << std::fixed << std::setprecision(2) << total_skew << " (Inv: " << inv_skew << ", Tox: " << tox_skew << ")" << std::endl;
         
@@ -235,7 +241,6 @@ private:
 
     uint32_t target_symbol_;
     L2Book book_;
-    ClientAccount account_;
     SharedMarketData* shm_ptr_ = nullptr;
     
     std::mutex strategy_mtx_;

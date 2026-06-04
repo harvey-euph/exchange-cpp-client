@@ -126,6 +126,14 @@ void AlgoTradingClient::query_position(uint32_t symbol_id) {
     mgmt_client_->send(fbb.GetBufferPointer(), fbb.GetSize());
 }
 
+void AlgoTradingClient::on_order_response(const OrderResponse* response) {
+    account_.handle_order_response(response);
+}
+
+void AlgoTradingClient::on_position_response(const PositionResponse* response) {
+    account_.handle_position_response(response);
+}
+
 void AlgoTradingClient::wait_until_ready() {
     std::unique_lock<std::mutex> lock(ready_mtx_);
     ready_cv_.wait(lock, [this] { return ready_.load(); });

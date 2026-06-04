@@ -1,5 +1,6 @@
 #include "AlgoTradingClient.hpp"
 #include "SharedMarketData.hpp"
+#include "DisplayUtil.hpp"
 #include <iostream>
 #include <vector>
 #include <sys/mman.h>
@@ -19,8 +20,6 @@ public:
 
     void on_l2_update(const L2Update*) override {}
     void on_l3_update(const L3Update*) override {}
-    void on_order_response(const OrderResponse*) override {}
-    void on_position_response(const PositionResponse*) override {}
 
     void run_strategy() {
         if (!is_ready() || !shm_ptr_) return;
@@ -31,21 +30,24 @@ public:
         // Trend follower observes 'last' (published) price
         double observed_price = last;
 
+        int64_t cash = account_.get_cash();
+        int64_t pos = account_.get_position(target_symbol_);
+
         if (observed_price > last_price_ && last_price_ > 0) {
             consecutive_up_++;
             consecutive_down_ = 0;
             if (consecutive_up_ >= 3) {
                 uint64_t qty = consecutive_up_ * 2;
-                std::cout << "[Strategy] Trend UP! consecutive=" << consecutive_up_ << " BUY qty=" << qty << std::endl;
                 new_market_order(target_symbol_, Side_Buy, qty);
+                display_.add_message("Trend UP (" + std::to_string(consecutive_up_) + ") BUY " + std::to_string(qty));
             }
         } else if (observed_price < last_price_ && last_price_ > 0) {
             consecutive_down_++;
             consecutive_up_ = 0;
             if (consecutive_down_ >= 3) {
                 uint64_t qty = consecutive_down_ * 2;
-                std::cout << "[Strategy] Trend DOWN! consecutive=" << consecutive_down_ << " SELL qty=" << qty << std::endl;
                 new_market_order(target_symbol_, Side_Sell, qty);
+                display_.add_message("Trend DOWN (" + std::to_string(consecutive_down_) + ") SELL " + std::to_string(qty));
             }
         } else if (observed_price == last_price_) {
             // No change
@@ -54,6 +56,8 @@ public:
         }
 
         last_price_ = observed_price;
+
+        display_.display("StrategyTrader", config_.client_id, target_symbol_, pos, cash, observed_price, account_.get_open_orders());
     }
 
 private:
@@ -69,6 +73,7 @@ private:
     double last_price_ = 0.0;
     int consecutive_up_ = 0;
     int consecutive_down_ = 0;
+    DisplayFramework display_;
 };
 
 } // namespace Exchange

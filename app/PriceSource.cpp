@@ -14,6 +14,7 @@ using namespace Exchange;
 SharedMarketData* shm_ptr = nullptr;
 
 void signal_handler(int signum) {
+    (void) signum;
     if (shm_ptr) {
         shm_ptr->running = false;
     }
