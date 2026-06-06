@@ -41,7 +41,7 @@ public:
         }
     }
 
-    void run_strategy() {
+    void on_timer() override {
         if (!is_ready()) return;
 
         std::lock_guard<std::mutex> lock(book_.mutex);
@@ -118,6 +118,12 @@ public:
         }
 
         display_.display("NoiseTrader", config_.client_id, target_symbol_, pos, cash, price, account_.get_open_orders());
+
+        // Update random timer for next iteration
+        std::random_device rd2;
+        std::mt19937 gen2(rd2());
+        std::uniform_int_distribution<> sleep_dist(500, 2000);
+        set_timer_interval(sleep_dist(gen2));
     }
 
 private:
@@ -146,17 +152,5 @@ int main() {
     config.symbol_ids = {1};
 
     Exchange::NoiseTrader noise(config, 1);
-    
-    std::thread strategy_thread([&noise]() {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> sleep_dist(500, 2000);
-
-        while (true) {
-            noise.run_strategy();
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_dist(gen)));
-        }
-    });
-
     return noise.run();
 }

@@ -61,7 +61,7 @@ public:
         AlgoTradingClient::on_position_response(response);
     }
 
-    void run_strategy() {
+    void on_timer() override {
         if (!is_ready() || !shm_ptr_) return;
 
         double curr, last;
@@ -260,15 +260,8 @@ int main() {
     Exchange::AlgoTradingConfig config;
     config.client_id = 201;
     config.symbol_ids = {1};
+    config.timer_interval_ms = 500;
 
     Exchange::MarketMaker mm(config, 1);
-    
-    std::thread strategy_thread([&mm]() {
-        while (true) {
-            mm.run_strategy();
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    });
-
     return mm.run();
 }

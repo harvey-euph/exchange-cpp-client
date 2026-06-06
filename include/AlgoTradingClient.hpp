@@ -21,6 +21,7 @@ struct AlgoTradingConfig {
     bool use_http = false;
     uint32_t client_id = 101;
     std::vector<uint32_t> symbol_ids = {1};
+    uint32_t timer_interval_ms = 1000;
 };
 
 class AlgoTradingClient {
@@ -34,6 +35,7 @@ public:
     virtual void on_l3_update(const L3Update* update) = 0;
     virtual void on_order_response(const OrderResponse* response);
     virtual void on_position_response(const PositionResponse* response);
+    virtual void on_timer() {}
 
     // Layer 2: Convenience
     void new_limit_order(uint32_t symbol_id, Side side, int64_t p, uint64_t q, uint64_t visible_qty = 0);
@@ -51,6 +53,8 @@ public:
 
     int run();
     void stop();
+
+    void set_timer_interval(uint32_t ms) { config_.timer_interval_ms = ms; }
 
     bool is_ready() const { return ready_; }
     void wait_until_ready();

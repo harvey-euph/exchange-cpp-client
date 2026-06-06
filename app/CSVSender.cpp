@@ -6,21 +6,25 @@
 #include <chrono>
 #include <string>
 #include <cstdlib>
+#include <vector>
 
 namespace Exchange {
 
 class CSVSender : public AlgoTradingClient {
 public:
     CSVSender(const Config& config, const std::string& csv_path)
-        : AlgoTradingClient(config), csv_path_(csv_path) {}
+        : AlgoTradingClient(config), csv_path_(csv_path) {
+        if (!reader_.loadFromCSV(csv_path_)) {
+            throw std::runtime_error("Failed to load CSV: " + csv_path_);
+        }
+        std::cout << "[CSVSender] Loaded " << reader_.getRequests().size() << " orders from " << csv_path_ << std::endl;
+    }
 
     void on_l2_update(const L2Update* update) override {
-        // Silently consume L2 updates or add logging if needed
         (void)update;
     }
 
     void on_l3_update(const L3Update* update) override {
-        // Silently consume L3 updates or add logging if needed
         (void)update;
     }
 
@@ -32,56 +36,48 @@ public:
         logPositionResponse(response, "[CSVSender]");
     }
 
-    void start_csv_processing() {
-        processing_thread_ = std::thread([this]() {
-            // Wait for server to send Ready frame (ExecType=Complete)
-            std::cout << "[CSVSender] Waiting for server ready signal..." << std::endl;
-            wait_until_ready();
-            std::cout << "[CSVSender] Server ready. Starting CSV processing." << std::endl;
+    void on_timer() override {
+        if (!is_ready()) {
+            static bool waiting_logged = false;
+            if (!waiting_logged) {
+                std::cout << "[CSVSender] Waiting for server ready signal..." << std::endl;
+                waiting_logged = true;
+            }
+            return;
+        }
 
-            CSVDataReader reader;
-            if (!reader.loadFromCSV(csv_path_)) {
-                std::cerr << "[CSVSender] Failed to load CSV: " << csv_path_ << std::endl;
+        const auto& requests = reader_.getRequests();
+        if (current_idx_ < requests.size()) {
+            OrderRequestT req;
+            requests[current_idx_]->UnPackTo(&req);
+            
+            send_order_request(req);
+            std::cout << "[CSVSender] Sent order (" << current_idx_ + 1 << "/" << requests.size() << "): action=" << EnumNameOrderAction(req.action)
+                      << ", symbol=" << req.symbol_id << ", side=" << EnumNameSide(req.side)
+                      << ", p=" << req.p << ", q=" << req.q << std::endl;
+            
+            current_idx_++;
+        } else {
+            if (!finished_) {
+                std::cout << "[CSVSender] Finished sending orders. Waiting for remaining responses..." << std::endl;
+                finished_ = true;
+                finish_start_time_ = std::chrono::steady_clock::now();
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - finish_start_time_).count() >= 5) {
+                std::cout << "[CSVSender] Stopping." << std::endl;
                 stop();
-                return;
             }
-
-            const auto& requests = reader.getRequests();
-            std::cout << "[CSVSender] Loaded " << requests.size() << " orders from " << csv_path_ << std::endl;
-
-            for (const auto* order : requests) {
-                if (!running_) break;
-
-                OrderRequestT req;
-                order->UnPackTo(&req);
-                
-                // AlgoTradingClient::send_order_request will fill in:
-                // - client_id (from config)
-                // - timestamp (current time)
-                // - order_id/exec_id (auto-incrementing if it's a New order)
-                
-                send_order_request(req);
-                std::cout << "[CSVSender] Sent order: action=" << EnumNameOrderAction(req.action)
-                          << ", symbol=" << req.symbol_id << ", side=" << EnumNameSide(req.side)
-                          << ", p=" << req.p << ", q=" << req.q << std::endl;
-
-                // Throttling to simulate more realistic message flow
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-
-            std::cout << "[CSVSender] Finished sending orders. Waiting 5s for remaining responses..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            stop();
-        });
-    }
-
-    ~CSVSender() {
-        if (processing_thread_.joinable()) processing_thread_.join();
+        }
     }
 
 private:
     std::string csv_path_;
-    std::thread processing_thread_;
+    CSVDataReader reader_;
+    size_t current_idx_ = 0;
+    bool finished_ = false;
+    std::chrono::steady_clock::time_point finish_start_time_;
 };
 
 } // namespace Exchange
@@ -94,11 +90,10 @@ int main(int argc, char** argv) {
 
     Exchange::AlgoTradingConfig config;
     config.use_http = true;
-    // Default config uses 127.0.0.1 and ports 9001, 9002, 9003
+    config.timer_interval_ms = 50;
     
     try {
         Exchange::CSVSender client(config, csv_path);
-        client.start_csv_processing();
         return client.run();
     } catch (const std::exception& e) {
         std::cerr << "[CSVSender] Fatal Error: " << e.what() << std::endl;

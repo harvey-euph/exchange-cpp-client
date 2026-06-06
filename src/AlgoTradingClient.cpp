@@ -164,6 +164,7 @@ int AlgoTradingClient::run() {
                     ready_ = true;
                 }
                 ready_cv_.notify_all();
+                return;
             }
             on_order_response(order_resp);
         } else if (resp->data_type() == ClientResponseData_PositionResponse) {
@@ -191,7 +192,8 @@ int AlgoTradingClient::run() {
     }
 
     while (running_) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        on_timer();
+        std::this_thread::sleep_for(std::chrono::milliseconds(config_.timer_interval_ms));
     }
     return 0;
 }

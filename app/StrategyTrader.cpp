@@ -21,7 +21,7 @@ public:
     void on_l2_update(const L2Update*) override {}
     void on_l3_update(const L3Update*) override {}
 
-    void run_strategy() {
+    void on_timer() override {
         if (!is_ready() || !shm_ptr_) return;
 
         double curr, last;
@@ -82,15 +82,8 @@ int main() {
     Exchange::AlgoTradingConfig config;
     config.client_id = 501;
     config.symbol_ids = {1};
+    config.timer_interval_ms = 500;
 
     Exchange::StrategyTrader strategy(config, 1);
-    
-    std::thread strategy_thread([&strategy]() {
-        while (true) {
-            strategy.run_strategy();
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    });
-
     return strategy.run();
 }

@@ -41,7 +41,7 @@ public:
         }
     }
 
-    void run_strategy() {
+    void on_timer() override {
         if (!is_ready() || !shm_ptr_) return;
 
         double curr, last;
@@ -160,15 +160,8 @@ int main() {
     Exchange::AlgoTradingConfig config;
     config.client_id = 301;
     config.symbol_ids = {1};
+    config.timer_interval_ms = 100;
 
     Exchange::Insider insider(config, 1);
-    
-    std::thread strategy_thread([&insider]() {
-        while (true) {
-            insider.run_strategy();
-            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Insider polls faster
-        }
-    });
-
     return insider.run();
 }

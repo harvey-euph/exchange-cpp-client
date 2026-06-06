@@ -25,22 +25,10 @@ public:
         needs_display_ = true;
     }
 
-    void start_display_thread() {
-        display_thread_ = std::thread([this]() {
-            while (running_) {
-                if (needs_display_) {
-                    display();
-                    needs_display_ = false;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-        });
-    }
-
-    void stop() {
-        AlgoTradingClient::stop();
-        if (display_thread_.joinable()) {
-            display_thread_.join();
+    void on_timer() override {
+        if (needs_display_) {
+            display();
+            needs_display_ = false;
         }
     }
 
@@ -93,8 +81,6 @@ private:
         std::cout << std::flush;
     }
 
-    ClientAccount account_;
-    std::thread display_thread_;
     std::atomic<bool> needs_display_{true};
 };
 
@@ -104,9 +90,9 @@ int main() {
     Exchange::AlgoTradingConfig config;
     config.client_id = 101;
     config.symbol_ids = {1, 2}; // Monitor symbols 1 and 2
+    config.timer_interval_ms = 500;
 
     Exchange::AccountMonitor monitor(config);
-    monitor.start_display_thread();
     
     std::cout << "Starting Account Monitor..." << std::endl;
     return monitor.run();
