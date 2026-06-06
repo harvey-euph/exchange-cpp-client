@@ -18,7 +18,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LAYER 5
+#define LAYER 10
 
 namespace Exchange {
 
@@ -98,7 +98,7 @@ public:
 
         double base_spread = 2.0; 
         double dynamic_spread = base_spread + stddev * volatility_factor_;
-        const uint64_t order_qty = 5;
+        const uint64_t order_qty = 50;
         const int64_t price_tolerance = 1;
 
         int64_t pos = account_.get_position(target_symbol_);
