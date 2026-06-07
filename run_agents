@@ -1,30 +1,24 @@
 #!/bin/bash
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+BUILD_AGENT_DIR="$PROJECT_ROOT/build/agents"
 LOG_DIR="$PROJECT_ROOT/log"
-SESSION="exchange_clients"
+SESSION="exchange_agents"
 
 mkdir -p "$LOG_DIR"
 
-declare -A SERVICES=(
-    ["Price Source"]="build/PriceSource"
-    ["Market Maker"]="build/MarketMaker"
-    ["Insider"]="build/Insider"
-    ["Noise Trader"]="build/NoiseTrader"
-    ["Strategy Trader"]="build/StrategyTrader"
-    ["Martingale Trader"]="build/MartingaleTrader"
-)
+if [ ! -d "$BUILD_AGENT_DIR" ]; then
+    echo "Error: $BUILD_AGENT_DIR not found. Please run 'make' first."
+    exit 1
+fi
 
-SERVICE_NAMES=("Price Source" "Market Maker" "Insider" "Noise Trader" "Strategy Trader" "Martingale Trader")
+# Find all executable files in the build/agents directory
+AGENTS=($(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable -printf "%f\n"))
 
-declare -A SERVICE_LOGS=(
-    ["Price Source"]="price_source.log"
-    ["Market Maker"]="market_maker.log"
-    ["Insider"]="insider.log"
-    ["Noise Trader"]="noise_trader.log"
-    ["Strategy Trader"]="strategy_trader.log"
-    ["Martingale Trader"]="martingale.log"
-)
+if [ ${#AGENTS[@]} -eq 0 ]; then
+    echo "Error: No agents found in $BUILD_AGENT_DIR."
+    exit 1
+fi
 
 # Check if session already exists
 if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -47,13 +41,13 @@ tmux set-option -t "$SESSION" status-fg white
 tmux bind-key -r Left select-window -t :-
 tmux bind-key -r Right select-window -t :+
 
-# Create windows for each client service
-for name in "${SERVICE_NAMES[@]}"; do
-    log="$LOG_DIR/${SERVICE_LOGS[$name]}"
-    exe="${SERVICES[$name]}"
+# Create windows for each agent
+for agent in "${AGENTS[@]}"; do
+    log="$LOG_DIR/${agent}.log"
+    exe="$BUILD_AGENT_DIR/$agent"
     
-    # Run the service in a loop for auto-restart
-    tmux new-window -t "$SESSION" -n "$name" "bash -c 'while true; do echo \"--- Starting $name ---\"; $PROJECT_ROOT/$exe 2>&1 | tee -a $log; echo \"--- $name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
+    # Run the agent in a loop for auto-restart
+    tmux new-window -t "$SESSION" -n "$agent" "bash -c 'while true; do echo \"--- Starting $agent ---\"; $exe 2>&1 | tee -a $log; echo \"--- $agent stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
 done
 
 # Select the Monitor window
@@ -65,11 +59,11 @@ trap "break" SIGINT SIGTERM
 while true; do
     tput cup 0 0
     echo "================================================================================"
-    echo "EXCHANGE CLIENTS MONITOR - [Ctrl+B, d] to Detach"
+    echo "EXCHANGE AGENTS MONITOR - [Ctrl+B, d] to Detach"
     echo "================================================================================"
-    printf "%-25s %-10s %-10s %-10s %-10s\n" "CLIENT" "STATUS" "PID" "%CPU" "MEM(MB)"
+    printf "%-25s %-10s %-10s %-10s %-10s\n" "AGENT" "STATUS" "PID" "%CPU" "MEM(MB)"
     echo "--------------------------------------------------------------------------------"
-    for name in "PriceSource" "MarketMaker" "Insider" "NoiseTrader" "StrategyTrader"; do
+    for name in "${AGENTS[@]}"; do
         PID=\$(pgrep -n -f "/\$name\$")
         if [ -n "\$PID" ]; then
             STATS=\$(ps -p \$PID -o pcpu,rss --no-headers 2>/dev/null)

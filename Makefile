@@ -4,11 +4,15 @@ INCLUDES := -Iinclude -I/home/harvey/vcpkg/installed/x64-linux/include
 
 BUILD_DIR := build
 SRC_DIR := src
-APP_DIR := app
+AGENT_DIR := agents
+EXAMPLE_DIR := examples
 FBS_DIR := fbs
 FBS_OUT := include/fbs
 LDFLAGS := -L/home/harvey/vcpkg/installed/x64-linux/lib
 LDLIBS := -pthread -lrt
+
+BUILD_AGENT_DIR := $(BUILD_DIR)/agents
+BUILD_EXAMPLE_DIR := $(BUILD_DIR)/examples
 
 # -----------------------------------------------------------------------------
 # FlatBuffers
@@ -26,25 +30,40 @@ SRC_OBJECTS := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SRC_SOURCES))
 SRC_DEPS := $(SRC_OBJECTS:.o=.d)
 
 # -----------------------------------------------------------------------------
-# App Executables
+# Agent Executables
 # -----------------------------------------------------------------------------
 
-APP_SOURCES := $(wildcard $(APP_DIR)/*.cpp)
-APP_TARGETS := $(patsubst $(APP_DIR)/%.cpp,$(BUILD_DIR)/%,$(APP_SOURCES))
+AGENT_SOURCES := $(wildcard $(AGENT_DIR)/*.cpp)
+AGENT_TARGETS := $(patsubst $(AGENT_DIR)/%.cpp,$(BUILD_AGENT_DIR)/%,$(AGENT_SOURCES))
+
+# -----------------------------------------------------------------------------
+# Example Executables
+# -----------------------------------------------------------------------------
+
+EXAMPLE_SOURCES := $(wildcard $(EXAMPLE_DIR)/*.cpp)
+EXAMPLE_TARGETS := $(patsubst $(EXAMPLE_DIR)/%.cpp,$(BUILD_EXAMPLE_DIR)/%,$(EXAMPLE_SOURCES))
 
 # -----------------------------------------------------------------------------
 # Default Target
 # -----------------------------------------------------------------------------
 
 .PHONY: all
-all: $(FBS_GENERATED) $(APP_TARGETS)
+all: $(FBS_GENERATED) $(AGENT_TARGETS) $(EXAMPLE_TARGETS)
 
 # -----------------------------------------------------------------------------
-# Build Apps
+# Build Agents
 # -----------------------------------------------------------------------------
 
-$(BUILD_DIR)/%: $(APP_DIR)/%.cpp $(SRC_OBJECTS) $(FBS_GENERATED)
-	@mkdir -p $(BUILD_DIR)
+$(BUILD_AGENT_DIR)/%: $(AGENT_DIR)/%.cpp $(SRC_OBJECTS) $(FBS_GENERATED)
+	@mkdir -p $(BUILD_AGENT_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(SRC_OBJECTS) $(LDFLAGS) $(LDLIBS) -o $@
+
+# -----------------------------------------------------------------------------
+# Build Examples
+# -----------------------------------------------------------------------------
+
+$(BUILD_EXAMPLE_DIR)/%: $(EXAMPLE_DIR)/%.cpp $(SRC_OBJECTS) $(FBS_GENERATED)
+	@mkdir -p $(BUILD_EXAMPLE_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(SRC_OBJECTS) $(LDFLAGS) $(LDLIBS) -o $@
 
 # -----------------------------------------------------------------------------
