@@ -1,0 +1,539 @@
+#include "AlgoTradingClient.hpp"
+#include "ring/SHMRingBuffer.hpp"
+#include "define.hpp"
+#include "Telemetry.hpp"
+#include "TimeUtil.hpp"
+#include <iostream>
+#include <iomanip>
+#include <random>
+#include <chrono>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <memory>
+#include <mutex>
+#include <csignal>
+#include <algorithm>
+
+namespace Exchange {
+
+class StressTrader : public AlgoTradingClient {
+public:
+    StressTrader(const Config& config) : AlgoTradingClient(config) 
+    {
+        // Check step progression and unresponsiveness frequently (every 100ms)
+        config_.timer_interval_ms = 100;
+
+        // Calibrate TSC frequency
+        auto start_time = std::chrono::steady_clock::now();
+        uint64_t start_tsc = read_tsc_begin();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        uint64_t end_tsc = read_tsc_end();
+        auto end_time = std::chrono::steady_clock::now();
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count();
+        if (ns > 0) {
+            tsc_hz_ = static_cast<double>(end_tsc - start_tsc) / (static_cast<double>(ns) / 1e9);
+        }
+
+        // Establish connections to SHM observers
+        reconnect_shm();
+
+        // Connect to Telemetry SHM
+        try {
+            telemetry_ = std::make_unique<Exchange::TelemetryProvider>(EXCHANGE_TELEMETRY, true);
+        } catch (...) {
+            std::cout << "[StressTrader] WARNING: Telemetry SHM not online yet." << std::endl;
+        }
+
+        // Initialize time references
+        step_start_time_ = std::chrono::steady_clock::now();
+        last_response_time_ = std::chrono::steady_clock::now();
+
+        // Print header for the step-load test report
+        std::string border_line(190, '=');
+        std::string sep_line(190, '-');
+        std::cout << "\n" << border_line << "\n";
+        std::cout << std::string(71, ' ') << "STRESS TESTING STEP-LOAD TEST REPORT (10s Steps)\n";
+        std::cout << border_line << "\n";
+        std::cout << "| Time     | Interval     | Rate          | Avg RTT      | P90 RTT      | P99 RTT      | Max RTT      | Peak Ring Occupancy                          | Telemetry Avg Latency                     |\n";
+        std::cout << sep_line << "\n";
+        std::cout << std::flush;
+
+        // Launch high-frequency queue monitoring thread (10us sampling rate)
+        monitoring_thread_ = std::thread(&StressTrader::monitoring_loop, this);
+
+        // Launch high-frequency stress-testing thread
+        stress_thread_ = std::thread(&StressTrader::stress_loop, this);
+    }
+
+    ~StressTrader() override {
+        running_ = false;
+        if (stress_thread_.joinable()) {
+            stress_thread_.join();
+        }
+        if (monitoring_thread_.joinable()) {
+            monitoring_thread_.join();
+        }
+    }
+
+    void on_l2_update(const L2Update*) override {}
+    void on_l3_update(const L3Update*) override {}
+
+    void on_order_response(const OrderResponse* response) override {
+        AlgoTradingClient::on_order_response(response);
+        
+        auto exec = response->exec_type();
+        if (exec == ExecType_New) {
+            ack_count_.fetch_add(1, std::memory_order_relaxed);
+        } else if (exec == ExecType_Replaced) {
+            modify_count_.fetch_add(1, std::memory_order_relaxed);
+        } else if (exec == ExecType_Cancelled) {
+            cancel_count_.fetch_add(1, std::memory_order_relaxed);
+        } else if (exec == ExecType_Fill || exec == ExecType_PartialFill) {
+            fill_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // Update response heartbeat
+        last_response_time_ = std::chrono::steady_clock::now();
+
+        // Measure RTT for direct request confirmations
+        if (exec == ExecType_New || exec == ExecType_Replaced || exec == ExecType_Cancelled) {
+            uint64_t order_id = response->order_id();
+            std::chrono::steady_clock::time_point start_time;
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> lock(send_times_mtx_);
+                auto it = request_send_times_.find(order_id);
+                if (it != request_send_times_.end()) {
+                    start_time = it->second;
+                    request_send_times_.erase(it);
+                    found = true;
+                }
+            }
+            if (found) {
+                auto end_time = std::chrono::steady_clock::now();
+                double rtt_us = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count() / 1000.0;
+                
+                std::lock_guard<std::mutex> lock(step_stats_mtx_);
+                step_rtt_sum_us_ += rtt_us;
+                step_rtt_count_++;
+                step_rtts_.push_back(rtt_us);
+                if (rtt_us > step_max_rtt_us_) {
+                    step_max_rtt_us_ = rtt_us;
+                }
+            }
+        }
+    }
+
+    void send_order_request(OrderRequestT& order) override {
+        AlgoTradingClient::send_order_request(order);
+        
+        // Record send time against order_id
+        {
+            std::lock_guard<std::mutex> lock(send_times_mtx_);
+            request_send_times_[order.order_id] = std::chrono::steady_clock::now();
+        }
+    }
+
+    void on_timer() override {
+        // Reconnect telemetry if it was offline
+        if (!telemetry_) {
+            try {
+                telemetry_ = std::make_unique<Exchange::TelemetryProvider>(EXCHANGE_TELEMETRY, true);
+            } catch (...) {}
+        }
+
+        auto now = std::chrono::steady_clock::now();
+
+        // Check for server death/unresponsiveness (termination condition)
+        if (is_ready() && sent_count_.load(std::memory_order_relaxed) > 0) {
+            double secs_since_resp = std::chrono::duration_cast<std::chrono::seconds>(now - last_response_time_).count();
+            if (secs_since_resp >= 10.0) {
+                std::cout << "\n=========================================================================================================================\n";
+                std::cout << "CRITICAL FAILURE: Server has stopped responding! (No response received for " << secs_since_resp << " seconds).\n";
+                std::cout << "Matching Engine is likely deadlocked, crashed, or queue buffers are completely blocked.\n";
+                std::cout << "Stress test terminated.\n";
+                std::cout << "=========================================================================================================================\n";
+                std::exit(0);
+            }
+        }
+
+        // Check if 10 seconds have elapsed to report and adjust interval
+        double elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(now - step_start_time_).count();
+        if (elapsed_sec >= 10.0) {
+            report_step_row(elapsed_sec);
+        }
+    }
+
+private:
+    void reconnect_shm() {
+        if (!req_observer_) {
+            try {
+                req_observer_ = std::make_unique<Exchange::SHMObserver>(ORDER_REQUEST, 0);
+            } catch (...) {}
+        }
+        if (!resp_observer_) {
+            try {
+                resp_observer_ = std::make_unique<Exchange::SHMObserver>(ORDER_RESPONSE, 0);
+            } catch (...) {}
+        }
+        if (!l2_observer_) {
+            try {
+                l2_observer_ = std::make_unique<Exchange::SHMObserver>(L2_UPDATE_RING, 0);
+            } catch (...) {}
+        }
+        if (!l3_observer_) {
+            try {
+                l3_observer_ = std::make_unique<Exchange::SHMObserver>(L3_UPDATE_RING, 0);
+            } catch (...) {}
+        }
+    }
+
+    void high_precision_delay(double sleep_us) {
+        if (sleep_us <= 0.0) return;
+        if (sleep_us >= 1000.0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(static_cast<int64_t>(sleep_us)));
+        } else {
+            auto start = std::chrono::steady_clock::now();
+            double target_ns = sleep_us * 1000.0;
+            while (true) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count();
+                if (elapsed_ns >= target_ns) break;
+                #if defined(__x86_64__) || defined(_M_X64)
+                    __builtin_ia32_pause();
+                #else
+                    std::this_thread::yield();
+                #endif
+            }
+        }
+    }
+
+    // Dedicated high-frequency monitoring thread (samples all 4 rings at 50us intervals)
+    void monitoring_loop() {
+        while (running_) {
+            reconnect_shm();
+
+            double req_ratio = req_observer_ ? req_observer_->get_occupancy_ratio() : 0.0;
+            double resp_ratio = resp_observer_ ? resp_observer_->get_occupancy_ratio() : 0.0;
+            double l2_ratio = l2_observer_ ? l2_observer_->get_occupancy_ratio() : 0.0;
+            double l3_ratio = l3_observer_ ? l3_observer_->get_occupancy_ratio() : 0.0;
+
+            {
+                std::lock_guard<std::mutex> lock(step_stats_mtx_);
+                if (req_ratio * 100.0 > peak_req_ratio_) peak_req_ratio_ = req_ratio * 100.0;
+                if (resp_ratio * 100.0 > peak_resp_ratio_) peak_resp_ratio_ = resp_ratio * 100.0;
+                if (l2_ratio * 100.0 > peak_l2_ratio_) peak_l2_ratio_ = l2_ratio * 100.0;
+                if (l3_ratio * 100.0 > peak_l3_ratio_) peak_l3_ratio_ = l3_ratio * 100.0;
+            }
+
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    }
+
+    void stress_loop() {
+        // Wait until WebSocket session is logged in and fully ready
+        while (running_ && !is_ready()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        // Take initial Telemetry snapshot
+        take_telemetry_snapshot();
+        step_start_time_ = std::chrono::steady_clock::now();
+        last_response_time_ = std::chrono::steady_clock::now();
+
+        while (running_) {
+            // Execute trading actions
+            do_trading_action();
+
+            // Apply fixed delay for the current step-load level
+            double cur_sleep = current_interval_us_.load(std::memory_order_relaxed);
+            high_precision_delay(cur_sleep);
+        }
+    }
+
+    void do_trading_action() {
+        if (config_.symbol_ids.empty()) return;
+        uint32_t symbol_id = config_.symbol_ids[0];
+
+        // Random walk of the mid price (5% chance per action to shift by 1 tick)
+        if (dist_action_(gen_) < 0.05) {
+            mid_price_ += (std::uniform_int_distribution<int>(0, 1)(gen_) == 0 ? 1 : -1);
+            if (mid_price_ < 1000) mid_price_ = 1000;
+        }
+
+        auto open_orders = account_.get_open_orders();
+        double roll = dist_action_(gen_);
+
+        if (open_orders.empty()) {
+            build_depth_scenario(symbol_id);
+            return;
+        }
+
+        if (roll < 0.35) {
+            build_depth_scenario(symbol_id);
+        } else if (roll < 0.55) {
+            take_one_layer_scenario(symbol_id);
+        } else if (roll < 0.70) {
+            sweep_multi_layers_scenario(symbol_id);
+        } else if (roll < 0.90) {
+            modify_back_and_forth_scenario(open_orders);
+        } else {
+            cancel_random_scenario(open_orders);
+        }
+    }
+
+    void build_depth_scenario(uint32_t symbol_id) {
+        bool is_buy = dist_buy_sell_(gen_);
+        int64_t level = std::uniform_int_distribution<int64_t>(1, 5)(gen_);
+        int64_t price = is_buy ? (mid_price_ - level) : (mid_price_ + level);
+        uint64_t qty = std::uniform_int_distribution<uint64_t>(20, 100)(gen_);
+
+        new_limit_order(symbol_id, is_buy ? Side_Buy : Side_Sell, price, qty);
+        sent_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void take_one_layer_scenario(uint32_t symbol_id) {
+        bool is_buy = dist_buy_sell_(gen_);
+        int64_t price = is_buy ? (mid_price_ + 1) : (mid_price_ - 1);
+        uint64_t qty = std::uniform_int_distribution<uint64_t>(10, 40)(gen_);
+
+        new_limit_order(symbol_id, is_buy ? Side_Buy : Side_Sell, price, qty);
+        sent_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void sweep_multi_layers_scenario(uint32_t symbol_id) {
+        bool is_buy = dist_buy_sell_(gen_);
+        int64_t price = is_buy ? (mid_price_ + 5) : (mid_price_ - 5);
+        uint64_t qty = std::uniform_int_distribution<uint64_t>(150, 500)(gen_);
+
+        new_limit_order(symbol_id, is_buy ? Side_Buy : Side_Sell, price, qty);
+        sent_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void modify_back_and_forth_scenario(const std::vector<OrderResponseT>& open_orders) {
+        size_t idx = std::uniform_int_distribution<size_t>(0, open_orders.size() - 1)(gen_);
+        const auto& order = open_orders[idx];
+
+        int64_t price_shift = std::uniform_int_distribution<int64_t>(-2, 2)(gen_);
+        if (price_shift == 0) price_shift = 1;
+        int64_t new_price = order.p + price_shift;
+        if (new_price <= 0) new_price = 1;
+
+        uint64_t new_qty = order.q;
+        if (dist_aggressive_(gen_) < 0.10) {
+            new_qty = std::uniform_int_distribution<uint64_t>(5, 100)(gen_);
+        }
+
+        replace_order(order.order_id, new_price, new_qty, order.symbol_id, order.side);
+        sent_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void cancel_random_scenario(const std::vector<OrderResponseT>& open_orders) {
+        size_t idx = std::uniform_int_distribution<size_t>(0, open_orders.size() - 1)(gen_);
+        const auto& order = open_orders[idx];
+
+        cancel_order(order.order_id, order.symbol_id, order.side);
+        sent_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void take_telemetry_snapshot() {
+        if (telemetry_) {
+            start_core_cnt_ = telemetry_->data()->core_count.load(std::memory_order_relaxed);
+            start_core_cyc_ = telemetry_->data()->core_cycles_sum.load(std::memory_order_relaxed);
+            start_mgmt_cnt_ = telemetry_->data()->mgmt_count.load(std::memory_order_relaxed);
+            start_mgmt_cyc_ = telemetry_->data()->mgmt_cycles_sum.load(std::memory_order_relaxed);
+            start_e2e_cnt_ = telemetry_->data()->e2e_count.load(std::memory_order_relaxed);
+            start_e2e_cyc_ = telemetry_->data()->e2e_cycles_sum.load(std::memory_order_relaxed);
+        }
+    }
+
+    void report_step_row(double elapsed_sec) {
+        uint64_t cur_sent = sent_count_.load(std::memory_order_relaxed);
+        double tps = static_cast<double>(cur_sent - last_sent_count_) / elapsed_sec;
+        last_sent_count_ = cur_sent;
+
+        double cur_interval_ms = current_interval_us_.load(std::memory_order_relaxed) / 1000.0;
+
+        // Fetch RTT metrics under lock
+        double avg_rtt_us = 0.0;
+        double p90_rtt_us = 0.0;
+        double p99_rtt_us = 0.0;
+        double max_rtt_us = 0.0;
+        double peak_req = 0.0;
+        double peak_resp = 0.0;
+        double peak_l2 = 0.0;
+        double peak_l3 = 0.0;
+        
+        std::vector<double> rtts;
+        {
+            std::lock_guard<std::mutex> lock(step_stats_mtx_);
+            if (step_rtt_count_ > 0) {
+                avg_rtt_us = step_rtt_sum_us_ / step_rtt_count_;
+            }
+            max_rtt_us = step_max_rtt_us_;
+            rtts = std::move(step_rtts_);
+            step_rtts_.clear();
+            
+            peak_req = peak_req_ratio_;
+            peak_resp = peak_resp_ratio_;
+            peak_l2 = peak_l2_ratio_;
+            peak_l3 = peak_l3_ratio_;
+
+            // Reset current step accumulators
+            step_rtt_sum_us_ = 0.0;
+            step_rtt_count_ = 0;
+            step_max_rtt_us_ = 0.0;
+            peak_req_ratio_ = 0.0;
+            peak_resp_ratio_ = 0.0;
+            peak_l2_ratio_ = 0.0;
+            peak_l3_ratio_ = 0.0;
+        }
+        
+        if (!rtts.empty()) {
+            std::sort(rtts.begin(), rtts.end());
+            size_t p90_idx = static_cast<size_t>(rtts.size() * 0.90);
+            size_t p99_idx = static_cast<size_t>(rtts.size() * 0.99);
+            if (p90_idx >= rtts.size()) p90_idx = rtts.size() - 1;
+            if (p99_idx >= rtts.size()) p99_idx = rtts.size() - 1;
+            p90_rtt_us = rtts[p90_idx];
+            p99_rtt_us = rtts[p99_idx];
+        }
+
+        // Calculate Telemetry differences
+        double avg_core_us = 0.0;
+        double avg_mgmt_us = 0.0;
+        double avg_e2e_us = 0.0;
+        if (telemetry_) {
+            uint64_t end_core_cnt = telemetry_->data()->core_count.load(std::memory_order_relaxed);
+            uint64_t end_core_cyc = telemetry_->data()->core_cycles_sum.load(std::memory_order_relaxed);
+            uint64_t end_mgmt_cnt = telemetry_->data()->mgmt_count.load(std::memory_order_relaxed);
+            uint64_t end_mgmt_cyc = telemetry_->data()->mgmt_cycles_sum.load(std::memory_order_relaxed);
+            uint64_t end_e2e_cnt = telemetry_->data()->e2e_count.load(std::memory_order_relaxed);
+            uint64_t end_e2e_cyc = telemetry_->data()->e2e_cycles_sum.load(std::memory_order_relaxed);
+
+            uint64_t diff_core_cnt = end_core_cnt - start_core_cnt_;
+            uint64_t diff_core_cyc = end_core_cyc - start_core_cyc_;
+            uint64_t diff_mgmt_cnt = end_mgmt_cnt - start_mgmt_cnt_;
+            uint64_t diff_mgmt_cyc = end_mgmt_cyc - start_mgmt_cyc_;
+            uint64_t diff_e2e_cnt = end_e2e_cnt - start_e2e_cnt_;
+            uint64_t diff_e2e_cyc = end_e2e_cyc - start_e2e_cyc_;
+
+            if (tsc_hz_ > 0.0) {
+                if (diff_core_cnt > 0) avg_core_us = (static_cast<double>(diff_core_cyc) / diff_core_cnt) / tsc_hz_ * 1e6;
+                if (diff_mgmt_cnt > 0) avg_mgmt_us = (static_cast<double>(diff_mgmt_cyc) / diff_mgmt_cnt) / tsc_hz_ * 1e6;
+                if (diff_e2e_cnt > 0) avg_e2e_us = (static_cast<double>(diff_e2e_cyc) / diff_e2e_cnt) / tsc_hz_ * 1e6;
+            }
+        }
+
+        // Print row
+        std::cout << "| " << std::setw(5) << (step_counter_ * 10) << " s  "
+                  << "| " << std::setw(8) << std::fixed << std::setprecision(2) << cur_interval_ms << " ms   "
+                  << "| " << std::setw(7) << std::fixed << std::setprecision(1) << tps << " tps   "
+                  << "| " << std::setw(7) << std::fixed << std::setprecision(1) << avg_rtt_us << " us   "
+                  << "| " << std::setw(7) << std::fixed << std::setprecision(1) << p90_rtt_us << " us   "
+                  << "| " << std::setw(7) << std::fixed << std::setprecision(1) << p99_rtt_us << " us   "
+                  << "| " << std::setw(7) << std::fixed << std::setprecision(1) << max_rtt_us << " us   "
+                  << "| Req:" << std::setw(4) << std::fixed << std::setprecision(1) << peak_req << "%"
+                  << ", Resp:" << std::setw(4) << peak_resp << "%"
+                  << ", L2:" << std::setw(4) << peak_l2 << "%"
+                  << ", L3:" << std::setw(4) << peak_l3 << "%   "
+                  << "| Core:" << std::setw(5) << std::fixed << std::setprecision(2) << avg_core_us << "us"
+                  << ", Mgmt:" << std::setw(5) << avg_mgmt_us << "us"
+                  << ", E2E:" << std::setw(7) << avg_e2e_us << "us  |" << std::endl;
+        std::cout << std::flush;
+
+        // Step delay adjustment: decrease delay by 10% (0.9) to ramp up pressure
+        double next_interval = current_interval_us_.load(std::memory_order_relaxed) * 0.90;
+        if (next_interval < 1.0) {
+            next_interval = 0.0;
+        }
+        current_interval_us_.store(next_interval, std::memory_order_relaxed);
+
+        // Prep snapshots for next step
+        take_telemetry_snapshot();
+        step_counter_++;
+        step_start_time_ = std::chrono::steady_clock::now();
+    }
+
+    // High-performance concurrency variables
+    std::thread stress_thread_;
+    std::thread monitoring_thread_;
+    std::atomic<uint64_t> sent_count_{0};
+    uint64_t last_sent_count_{0};
+    std::chrono::steady_clock::time_point step_start_time_;
+    std::chrono::steady_clock::time_point last_response_time_;
+
+    std::atomic<double> current_interval_us_{10000.0}; // Starts at 10ms (10,000 us)
+    int step_counter_ = 1;
+
+    // Observability observers
+    std::unique_ptr<Exchange::SHMObserver> req_observer_;
+    std::unique_ptr<Exchange::SHMObserver> resp_observer_;
+    std::unique_ptr<Exchange::SHMObserver> l2_observer_;
+    std::unique_ptr<Exchange::SHMObserver> l3_observer_;
+    std::unique_ptr<Exchange::TelemetryProvider> telemetry_;
+
+    double tsc_hz_ = 0.0;
+
+    // Telemetry snapshots
+    uint64_t start_core_cnt_ = 0;
+    uint64_t start_core_cyc_ = 0;
+    uint64_t start_mgmt_cnt_ = 0;
+    uint64_t start_mgmt_cyc_ = 0;
+    uint64_t start_e2e_cnt_ = 0;
+    uint64_t start_e2e_cyc_ = 0;
+
+    // Step stats accumulators (mutex-protected)
+    std::mutex step_stats_mtx_;
+    double step_rtt_sum_us_ = 0.0;
+    uint64_t step_rtt_count_ = 0;
+    double step_max_rtt_us_ = 0.0;
+    std::vector<double> step_rtts_;
+    double peak_req_ratio_ = 0.0;
+    double peak_resp_ratio_ = 0.0;
+    double peak_l2_ratio_ = 0.0;
+    double peak_l3_ratio_ = 0.0;
+
+    // General stats counters
+    std::atomic<uint64_t> ack_count_{0};
+    std::atomic<uint64_t> modify_count_{0};
+    std::atomic<uint64_t> cancel_count_{0};
+    std::atomic<uint64_t> fill_count_{0};
+
+    // RTT correlation mapping
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> request_send_times_;
+    std::mutex send_times_mtx_;
+    std::atomic<double> recent_rtt_us_{0.0};
+
+    // RTT accumulated total variables
+    std::atomic<uint64_t> rtt_count_{0};
+    double total_rtt_sum_us_{0.0};
+    std::mutex rtt_stats_mtx_;
+
+    // Random walk and order generation distributions
+    std::mt19937 gen_{std::random_device{}()};
+    std::uniform_real_distribution<> dist_action_{0.0, 1.0};
+    std::uniform_int_distribution<> dist_buy_sell_{0, 1};
+    std::uniform_real_distribution<> dist_aggressive_{0.0, 1.0};
+    std::uniform_int_distribution<int64_t> dist_price_offset_{0, 5};
+    std::uniform_int_distribution<uint64_t> dist_qty_{1, 10};
+    int64_t mid_price_{5000};
+};
+
+} // namespace Exchange
+
+int main() {
+    std::signal(SIGINT, [](int) {
+        std::cout << "\n[StressTrader] Terminated by user signal." << std::endl;
+        std::exit(0);
+    });
+
+    Exchange::AlgoTradingConfig config;
+    config.client_id = 999;
+    config.symbol_ids = {1};
+    config.timer_interval_ms = 100; // fast on_timer checking
+
+    Exchange::StressTrader trader(config);
+    return trader.run();
+}

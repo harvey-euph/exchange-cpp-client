@@ -1,6 +1,6 @@
 CXX := g++
 CXXFLAGS := -std=c++20 -Wall -Wextra -MMD -MP
-INCLUDES := -Iinclude -I/home/harvey/vcpkg/installed/x64-linux/include
+INCLUDES := -Iinclude -I../exchange-core/include -I/home/harvey/vcpkg/installed/x64-linux/include
 
 BUILD_DIR := build
 SRC_DIR := src
@@ -53,6 +53,10 @@ all: $(FBS_GENERATED) $(AGENT_TARGETS) $(EXAMPLE_TARGETS)
 # -----------------------------------------------------------------------------
 # Build Agents
 # -----------------------------------------------------------------------------
+
+$(BUILD_AGENT_DIR)/stress-trader: $(AGENT_DIR)/stress-trader.cpp $(SRC_OBJECTS) $(FBS_GENERATED)
+	@mkdir -p $(BUILD_AGENT_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(SRC_OBJECTS) ../exchange-core/src/SHMRingBuffer.cpp $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD_AGENT_DIR)/%: $(AGENT_DIR)/%.cpp $(SRC_OBJECTS) $(FBS_GENERATED)
 	@mkdir -p $(BUILD_AGENT_DIR)

@@ -47,7 +47,7 @@ public:
     void cancel_order(uint64_t order_id, uint32_t symbol_id = 0, Side side = Side_None);
 
     // Layer 0: Raw Request
-    void send_order_request(OrderRequestT& order);
+    virtual void send_order_request(OrderRequestT& order);
 
     void query_position(uint32_t symbol_id);
 
