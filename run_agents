@@ -7,90 +7,58 @@ SESSION="exchange_agents"
 
 mkdir -p "$LOG_DIR"
 
-if [ ! -d "$BUILD_AGENT_DIR" ]; then
-    echo "Error: $BUILD_AGENT_DIR not found. Please run 'make' first."
-    exit 1
-fi
-
-# Find all executable files in the build/agents directory
-AGENTS=($(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable -printf "%f\n"))
-
-if [ ${#AGENTS[@]} -eq 0 ]; then
-    echo "Error: No agents found in $BUILD_AGENT_DIR."
-    exit 1
-fi
-
 # Check if session already exists
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "Re-attaching to existing session '$SESSION'..."
-    sleep 1
-    if [ -n "$TMUX" ]; then
-        tmux switch-client -t "$SESSION"
-    else
-        tmux attach-session -t "$SESSION"
-    fi
+if tmux list-sessions -F '#S' 2>/dev/null | grep -q -x "$SESSION"; then
+    echo "Session '$SESSION' is already running in the background."
     exit 0
 fi
 
-# Start a new detached session
-tmux new-session -d -s "$SESSION" -n "Monitor" "bash"
+# If binaries not found or not compiled, run make
+if [ ! -d "$BUILD_AGENT_DIR" ] || [ -z "$(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable 2>/dev/null)" ]; then
+    echo "Agent binaries not found or not compiled. Running 'make'..."
+    make -C "$PROJECT_ROOT"
+    if [ $? -ne 0 ]; then
+        echo "Error: 'make' failed."
+        exit 1
+    fi
+fi
 
-# Basic tmux configuration
+# Find all executable agents dynamically
+AGENTS=($(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable | sort))
+
+if [ ${#AGENTS[@]} -eq 0 ]; then
+    echo "Error: No executable agents found in $BUILD_AGENT_DIR even after running make."
+    exit 1
+fi
+
+echo "Starting $SESSION agents in the background (detached tmux session)..."
+
+# Start a new detached session with the first agent
+first_exe="${AGENTS[0]}"
+first_name=$(basename "$first_exe")
+log="$LOG_DIR/${first_name}.log"
+
+tmux new-session -d -s "$SESSION" -n "$first_name" "bash -c 'while true; do echo \"--- Starting $first_name ---\"; $first_exe 2>&1 | tee -a $log; echo \"--- $first_name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
+
+# Configure status bar for help
 tmux set-option -t "$SESSION" status-bg black
 tmux set-option -t "$SESSION" status-fg white
+
+# Bind Ctrl+B + Arrows to switch windows easily
 tmux bind-key -r Left select-window -t :-
 tmux bind-key -r Right select-window -t :+
 
-# Create windows for each agent
-for agent in "${AGENTS[@]}"; do
-    log="$LOG_DIR/${agent}.log"
-    exe="$BUILD_AGENT_DIR/$agent"
+# Create windows for the remaining agents
+for ((i=1; i<${#AGENTS[@]}; i++)); do
+    exe="${AGENTS[$i]}"
+    name=$(basename "$exe")
+    log="$LOG_DIR/${name}.log"
     
     # Run the agent in a loop for auto-restart
-    tmux new-window -t "$SESSION" -n "$agent" "bash -c 'while true; do echo \"--- Starting $agent ---\"; $exe 2>&1 | tee -a $log; echo \"--- $agent stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
+    tmux new-window -t "$SESSION" -n "$name" "bash -c 'while true; do echo \"--- Starting $name ---\"; $exe 2>&1 | tee -a $log; echo \"--- $name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
 done
 
-# Select the Monitor window
+# Select the first window by default
 tmux select-window -t "$SESSION":0
 
-# Monitor Loop
-MONITOR_CMD=$(cat <<EOF
-trap "break" SIGINT SIGTERM
-while true; do
-    tput cup 0 0
-    echo "================================================================================"
-    echo "EXCHANGE AGENTS MONITOR - [Ctrl+B, d] to Detach"
-    echo "================================================================================"
-    printf "%-25s %-10s %-10s %-10s %-10s\n" "AGENT" "STATUS" "PID" "%CPU" "MEM(MB)"
-    echo "--------------------------------------------------------------------------------"
-    for name in "${AGENTS[@]}"; do
-        PID=\$(pgrep -n -f "/\$name\$")
-        if [ -n "\$PID" ]; then
-            STATS=\$(ps -p \$PID -o pcpu,rss --no-headers 2>/dev/null)
-            if [ -n "\$STATS" ]; then
-                CPU=\$(echo \$STATS | awk '{print \$1}')
-                RSS_KB=\$(echo \$STATS | awk '{print \$2}')
-                RSS_MB=\$(echo \$RSS_KB | awk '{printf "%.1f", \$1/1024}')
-                printf "%-25s %-10s %-10s %-10s %-10s\n" "\$name" "ALIVE" "\$PID" "\$CPU%" "\${RSS_MB}MB"
-            else
-                printf "%-25s %-10s %-10s %-10s %-10s\n" "\$name" "STARTING" "\$PID" "-" "-"
-            fi
-        else
-            printf "%-25s %-10s %-10s %-10s %-10s\n" "\$name" "DEAD" "-" "-" "-"
-        fi
-    done
-    echo "================================================================================"
-    sleep 1
-done
-EOF
-)
-
-# Send the monitor command to Window 0
-tmux send-keys -t "$SESSION":0 "$MONITOR_CMD" C-m
-
-# Final re-attach
-if [ -n "$TMUX" ]; then
-    tmux switch-client -t "$SESSION"
-else
-    tmux attach-session -t "$SESSION"
-fi
+echo "Agents successfully started. To view them, run: tmux attach -t $SESSION"

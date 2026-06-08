@@ -1,0 +1,11 @@
+#!/bin/bash
+
+SESSION="exchange_agents"
+
+echo "[kill_agents] Stopping all exchange agent processes..."
+pkill -f "build/agents/"
+
+echo "[kill_agents] Killing tmux session '$SESSION'..."
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+echo "[kill_agents] Done."
