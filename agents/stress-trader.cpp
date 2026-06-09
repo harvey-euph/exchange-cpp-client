@@ -443,8 +443,11 @@ private:
                   << ", E2E:" << std::setw(7) << avg_e2e_us << "us  |" << std::endl;
         std::cout << std::flush;
 
-        // Step delay adjustment: decrease delay by 10% (0.9) to ramp up pressure
-        double next_interval = current_interval_us_.load(std::memory_order_relaxed) * 0.90;
+        double X = std::max({peak_req, peak_resp, peak_l2, peak_l3});
+
+        double factor = (std::abs(X-50.0) < 20) ? 0.03 : 0.1; 
+        double adj = (X>50.0) ? factor : -factor;      
+        double next_interval = current_interval_us_.load(std::memory_order_relaxed) * (1 + adj);
         if (next_interval < 1.0) {
             next_interval = 0.0;
         }
