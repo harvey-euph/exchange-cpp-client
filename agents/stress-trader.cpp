@@ -353,7 +353,7 @@ private:
         double tps = static_cast<double>(cur_sent - last_sent_count_) / elapsed_sec;
         last_sent_count_ = cur_sent;
 
-        double cur_interval_ms = current_interval_us_.load(std::memory_order_relaxed) / 1000.0;
+        double cur_interval_us = current_interval_us_.load(std::memory_order_relaxed);
 
         // Fetch RTT metrics under lock
         double avg_rtt_us = 0.0;
@@ -428,7 +428,7 @@ private:
 
         // Print row
         std::cout << "| " << std::setw(5) << (step_counter_ * 10) << " s  "
-                  << "| " << std::setw(8) << std::fixed << std::setprecision(2) << cur_interval_ms << " ms   "
+                  << "| " << std::setw(8) << std::fixed << std::setprecision(2) << cur_interval_us << " us   "
                   << "| " << std::setw(7) << std::fixed << std::setprecision(1) << tps << " tps   "
                   << "| " << std::setw(7) << std::fixed << std::setprecision(1) << avg_rtt_us << " us   "
                   << "| " << std::setw(7) << std::fixed << std::setprecision(1) << p90_rtt_us << " us   "
@@ -445,7 +445,7 @@ private:
 
         double X = std::max({peak_req, peak_resp, peak_l2, peak_l3});
 
-        double factor = (std::abs(X-50.0) < 20) ? 0.03 : 0.1; 
+        double factor = (std::abs(X-50.0) < 20) ? 0.01 : 0.05; 
         double adj = (X>50.0) ? factor : -factor;      
         double next_interval = current_interval_us_.load(std::memory_order_relaxed) * (1 + adj);
         if (next_interval < 1.0) {
@@ -467,7 +467,7 @@ private:
     std::chrono::steady_clock::time_point step_start_time_;
     std::chrono::steady_clock::time_point last_response_time_;
 
-    std::atomic<double> current_interval_us_{10000.0}; // Starts at 10ms (10,000 us)
+    std::atomic<double> current_interval_us_{1000.0}; // Starts at 1ms (1,000 us)
     int step_counter_ = 1;
 
     // Observability observers
