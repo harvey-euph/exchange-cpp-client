@@ -13,23 +13,59 @@ if tmux list-sessions -F '#S' 2>/dev/null | grep -q -x "$SESSION"; then
     exit 0
 fi
 
-# If binaries not found or not compiled, run make
-if [ ! -d "$BUILD_AGENT_DIR" ] || [ -z "$(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable 2>/dev/null)" ]; then
-    echo "Agent binaries not found or not compiled. Running 'make'..."
-    make -C "$PROJECT_ROOT"
-    if [ $? -ne 0 ]; then
-        echo "Error: 'make' failed."
-        exit 1
-    fi
+# Check CPU count and set the appropriate Tier
+NUM_CORES=$(nproc)
+if [ "$NUM_CORES" -lt 8 ]; then
+    TIER=1
+    TIER_NAME="Low Power (Cores: $NUM_CORES)"
+elif [ "$NUM_CORES" -lt 24 ]; then
+    TIER=2
+    TIER_NAME="Dedicated Cores (Cores: $NUM_CORES)"
+else
+    TIER=3
+    TIER_NAME="Full Isolation (Cores: $NUM_CORES)"
 fi
 
-# Find all executable agents dynamically
-AGENTS=($(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable | sort))
+echo "Detected CPU cores: $NUM_CORES. Applying Tier $TIER: $TIER_NAME configuration."
+
+
+
+# Find and filter executable agents dynamically
+ALL_AGENTS=($(find "$BUILD_AGENT_DIR" -maxdepth 1 -type f -executable | sort))
+AGENTS=()
+for agent in "${ALL_AGENTS[@]}"; do
+    name=$(basename "$agent")
+    if [[ "$name" == "mm-advanced" || "$name" == "mm-native" || "$name" == "stra-noise" ]]; then
+        AGENTS+=("$agent")
+    fi
+done
 
 if [ ${#AGENTS[@]} -eq 0 ]; then
-    echo "Error: No executable agents found in $BUILD_AGENT_DIR even after running make."
+    echo "Error: No allowed executable agents found in $BUILD_AGENT_DIR. Please compile the project first using 'make'."
     exit 1
 fi
+
+get_run_cmd() {
+    local exe_path="$1"
+    local agent_name="$2"
+    if [ "$TIER" -eq 3 ]; then
+        local core_id=""
+        case "$agent_name" in
+            "mm-advanced")    core_id="8" ;;
+            "mm-native")      core_id="9" ;;
+            "stra-insider")   core_id="10" ;;
+            "stra-noise")     core_id="11" ;;
+            "stress-trader")  core_id="12" ;;
+        esac
+        if [ -n "$core_id" ]; then
+            echo "taskset -c $core_id $exe_path"
+        else
+            echo "$exe_path"
+        fi
+    else
+        echo "$exe_path"
+    fi
+}
 
 echo "Starting $SESSION agents in the background (detached tmux session)..."
 
@@ -37,8 +73,9 @@ echo "Starting $SESSION agents in the background (detached tmux session)..."
 first_exe="${AGENTS[0]}"
 first_name=$(basename "$first_exe")
 log="$LOG_DIR/${first_name}.log"
+first_run_cmd=$(get_run_cmd "$first_exe" "$first_name")
 
-tmux new-session -d -s "$SESSION" -n "$first_name" "bash -c 'while true; do echo \"--- Starting $first_name ---\"; $first_exe 2>&1 | tee -a $log; echo \"--- $first_name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
+tmux new-session -d -s "$SESSION" -n "$first_name" "bash -c 'while true; do echo \"--- Starting $first_name ---\"; $first_run_cmd 2>&1 | tee -a $log; echo \"--- $first_name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
 
 # Configure status bar for help
 tmux set-option -t "$SESSION" status-bg black
@@ -53,9 +90,10 @@ for ((i=1; i<${#AGENTS[@]}; i++)); do
     exe="${AGENTS[$i]}"
     name=$(basename "$exe")
     log="$LOG_DIR/${name}.log"
+    run_cmd=$(get_run_cmd "$exe" "$name")
     
     # Run the agent in a loop for auto-restart
-    tmux new-window -t "$SESSION" -n "$name" "bash -c 'while true; do echo \"--- Starting $name ---\"; $exe 2>&1 | tee -a $log; echo \"--- $name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
+    tmux new-window -t "$SESSION" -n "$name" "bash -c 'while true; do echo \"--- Starting $name ---\"; $run_cmd 2>&1 | tee -a $log; echo \"--- $name stopped/crashed, restarting in 2s ---\"; sleep 2; done'"
 done
 
 # Select the first window by default

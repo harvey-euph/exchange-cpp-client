@@ -1,6 +1,14 @@
 CXX := g++
-CXXFLAGS := -std=c++20 -Wall -Wextra -MMD -MP
 INCLUDES := -Iinclude -I../exchange-core/include -I/home/harvey/vcpkg/installed/x64-linux/include
+
+# Detect CPU core count to determine performance tier
+NUM_CORES := $(shell nproc)
+CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -MMD -MP
+
+ifeq ($(shell test $(NUM_CORES) -ge 8; echo $$?),0)
+    # Enable native microarchitecture tuning on systems with >= 8 cores
+    CXXFLAGS += -march=native
+endif
 
 BUILD_DIR := build
 SRC_DIR := src
